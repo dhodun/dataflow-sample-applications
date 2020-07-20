@@ -88,78 +88,63 @@ public class ClickstreamProcessing
         new WriteRawJSONMessagesToBigQuery(
             options.getDataWarehouseOutputProject(), options.getClickStreamBigQueryRawTable()));
 
+    /**
+     * *********************************************************************************************
+     * Clean the data
+     **********************************************************************************************
+     */
+    PCollection<ClickStreamEvent> cleanedData =
+        clickStreamEvents.apply("Clean Data", new ValidateAndCorrectClickStreamEvents());
 
+    /**
+     * *********************************************************************************************
+     * Write Cleaned Data to BigQuery
+     **********************************************************************************************
+     */
+    if (options.getTestModeEnabled()) {
+      cleanedData.apply(ParDo.of(new Print<>()));
+    } else {
+      cleanedData.apply(
+          "StoreCleanedDataToDW",
+          BigQueryIO.<ClickStreamEvent>write()
+              .useBeamSchema()
+              .withWriteDisposition(WriteDisposition.WRITE_APPEND)
+              .withTimePartitioning(new TimePartitioning().setField("timestamp"))
+              .to(
+                  String.format(
+                      "%s:%s",
+                      options.getDataWarehouseOutputProject(),
+                      options.getClickStreamBigQueryCleanTable())));
+    }
+    /**
+     * *********************************************************************************************
+     * Filter out events of type ERROR
+     **********************************************************************************************
+     */
+    PCollection<ClickStreamEvent> cleanDataWithOutErrorEvents =
+        cleanedData.apply(
+            Filter.<ClickStreamEvent>create().whereFieldName("event", c -> !c.equals("ERROR")));
 
-        /**
-         *
-     **********************************************************************************************
-         * Clean the data
-         *
-     **********************************************************************************************
-         */
-        PCollection<ClickStreamEvent> cleanedData =
-            clickStreamEvents.apply("Clean Data", new ValidateAndCorrectClickStreamEvents());
+    /**
+     * *********************************************************************************************
+     * Count Page Views per product in 5 sec windows
+     * *********************************************************************************************
+     */
+    PCollection<PageViewAggregator> pageViewAggregator =
+        cleanDataWithOutErrorEvents.apply(new CountViewsPerProduct(Duration.standardSeconds(5)));
 
-        /**
-         *
-     **********************************************************************************************
-         * Write Cleaned Data to BigQuery
-         *
-     **********************************************************************************************
-         */
-        if (options.getTestModeEnabled()) {
-          cleanedData.apply(ParDo.of(new Print<>()));
-        } else {
-          cleanedData.apply(
-              "StoreCleanedDataToDW",
-              BigQueryIO.<ClickStreamEvent>write()
-                  .useBeamSchema()
-                  .withWriteDisposition(WriteDisposition.WRITE_APPEND)
-                  .withTimePartitioning(new TimePartitioning().setField("timestamp"))
-                  .to(
-                      String.format(
-                          "%s:%s",
-                          options.getDataWarehouseOutputProject(),
-                          options.getClickStreamBigQueryCleanTable())));
-        }
-        /**
-         *
-     **********************************************************************************************
-         * Filter out events of type ERROR
-         *
-     **********************************************************************************************
-         */
-        PCollection<ClickStreamEvent> cleanDataWithOutErrorEvents =
-            cleanedData.apply(
-                Filter.<ClickStreamEvent>create().whereFieldName("event", c ->
-     !c.equals("ERROR")));
+    /**
+     * *******************************************************************************************
+     * Export page view aggregates to BigTable & BigQuery
+     * *******************************************************************************************
+     */
+    pageViewAggregator.apply(
+        WriteAggregatesToBigTable.writeToBigTable(Duration.standardSeconds(5)));
 
-        /**
-         *
-     **********************************************************************************************
-         * Count Page Views per product in 5 sec windows
-         *
-     **********************************************************************************************
-         */
-        PCollection<PageViewAggregator> pageViewAggregator =
-            cleanDataWithOutErrorEvents.apply(new
-     CountViewsPerProduct(Duration.standardSeconds(5)));
+    pageViewAggregator.apply(
+        WriteAggregationToBigQuery.writeAggregationToBigQuery(
+            "PageView", Duration.standardSeconds(5)));
 
-        /**
-         *
-     **********************************************************************************************
-         * Export page view aggregates to BigTable & BigQuery
-         *
-     **********************************************************************************************
-         */
-        pageViewAggregator.apply(
-            WriteAggregatesToBigTable.writeToBigTable(Duration.standardSeconds(5)));
-
-        pageViewAggregator.apply(
-            WriteAggregationToBigQuery.writeAggregationToBigQuery(
-                "PageView", Duration.standardSeconds(5)));
-
-        return cleanDataWithOutErrorEvents;
-
+    return cleanDataWithOutErrorEvents;
   }
 }
